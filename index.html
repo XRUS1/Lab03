@@ -70,7 +70,11 @@ Licensed under the MIT License
     }
 
     function onRequestSession() {
-      return navigator.xr.requestSession('inline').then(onSessionStarted);
+      // SOLUCIÓN AL FONDO NEGRO: Al pedir una sesión inline, pasamos explícitamente la característica "viewer"
+      // Esto le otorga al navegador los permisos internos necesarios para instanciar la cámara en pantalla plana.
+      return navigator.xr.requestSession('inline', {
+        requiredFeatures: ['viewer']
+      }).then(onSessionStarted);
     }
 
     function onSessionStarted(session) {
@@ -83,9 +87,11 @@ Licensed under the MIT License
       let glLayer = new XRWebGLLayer(session, gl);
       session.updateRenderState({ baseLayer: glLayer });
 
+      // Solicitamos el espacio de referencia básico que permite inicializar el lienzo
       session.requestReferenceSpace('viewer').then((refSpace) => {
         xrRefSpace = refSpace;
-        // El asistente original mapea el canvas para escuchar interacciones del ratón/táctiles
+        
+        // Inicializamos el asistente para poder mover la cámara arrastrando con el dedo o con el ratón
         inlineViewerHelper = new InlineViewerHelper(gl.canvas, refSpace);
         inlineViewerHelper.setHeight(1.6); 
 
@@ -122,7 +128,8 @@ Licensed under the MIT License
 
     function onXRFrame(t, frame) {
       let session = frame.session;
-      // Usamos la pose calculada por el asistente de arrastre táctil
+      
+      // Consultamos la pose generada a través de las interacciones táctiles/ratón calculadas por el helper
       let refSpace = inlineViewerHelper ? inlineViewerHelper.referenceSpace : xrRefSpace;
       let pose = frame.getViewerPose(refSpace);
 
@@ -130,6 +137,7 @@ Licensed under the MIT License
       session.requestAnimationFrame(onXRFrame);
 
       if (pose) {
+        // Renderizamos de manera segura la capa de dibujo
         scene.drawXRFrame(frame, pose);
       }
 
