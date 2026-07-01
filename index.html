@@ -12,133 +12,90 @@ Licensed under the MIT License
   <link rel='icon' type='image/png' sizes='3232' href='favicon-32x32.png'>
   <link rel='icon' type='image/png' sizes='96x96' href='favicon-96x96.png'>
   <link rel='stylesheet' href='css/common.css'>
-  <title>Seguimiento a escala de la habitacion (Magic Window Universal)</title>
-  <style>
-    body, html {
-      margin: 0;
-      padding: 0;
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-      background-color: #000;
-    }
-    canvas {
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100% !important;
-      height: 100% !important;
-    }
-    #start-button {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      z-index: 20;
-      padding: 15px 30px;
-      font-size: 18px;
-      background: #00bcd4;
-      color: #fff;
-      border: none;
-      border-radius: 5px;
-      cursor: pointer;
-      font-weight: bold;
-      box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-    }
-  </style>
+  <title>Seguimiento a escala de la habitacion (Magic Window)</title>
 </head>
 <body>
-  <button id="start-button">INICIAR PANORAMA 360°</button>
-
-  <header style="position: absolute; z-index: 10; background: rgba(0,0,0,0.6); color: #fff; padding: 10px; width: 100%;">
+  <header>
     <details open>
       <summary>Escala de habitacion</summary>
       <p>
-        Mueve tu teléfono o arrastra el ratón en la computadora para explorar el entorno en 360 grados de forma universal.
-        <a class="back" href="./" style="color: #00bcd4;">Back</a>
+        Haz clic abajo para iniciar. Explora el entorno en 360 grados arrastrando tu dedo en la pantalla del celular o con el ratón en la computadora.
+        <a class="back" href="./">Back</a>
       </p>
     </details>
   </header>
 
   <script type="module">
+    import { WebXRButton } from './js/util/webxr-button.js';
     import { Scene } from './js/render/scenes/scene.js';
     import { Renderer, createWebGLContext } from './js/render/core/renderer.js';
     import { Gltf2Node } from './js/render/nodes/gltf2.js';
     import { SkyboxNode } from './js/render/nodes/skybox.js';
+    import { InlineViewerHelper } from './js/util/inline-viewer-helper.js';
+    import { QueryArgs } from './js/util/query-args.js';
 
-    // Variables del motor gráfico WebGL estándar
+    import WebXRPolyfill from './js/third-party/webxr-polyfill/build/webxr-polyfill.module.js';
+    if (QueryArgs.getBool('usePolyfill', true)) {
+      let polyfill = new WebXRPolyfill();
+    }
+
+    let xrButton = null;
+    let xrSession = null;
+    let xrRefSpace = null;
+    let inlineViewerHelper = null;
+
     let gl = null;
     let renderer = null;
     let scene = new Scene();
 
-    // Variables de orientación acumulada (Radianes)
-    let alpha = 0, beta = 0, gamma = 0;
-    let isMobile = false;
-
-    // Nodo contenedor que rotaremos manualmente con el giroscopio
-    let rootRotationNode = scene.createNode();
-    scene.addNode(rootRotationNode);
-
-    // Cargamos los elementos dentro de nuestro nodo controlado
-    rootRotationNode.addNode(new Gltf2Node({url: 'media/gltf/camp/camp.gltf'}));
-    rootRotationNode.addNode(new SkyboxNode({url: 'media/textures/eilenriede-park-2k.png'}));
+    scene.addNode(new Gltf2Node({url: 'media/gltf/camp/camp.gltf'}));
+    scene.addNode(new SkyboxNode({url: 'media/textures/eilenriede-park-2k.png'}));
     scene.standingStats(true);
 
-    // Inicialización al cargar la página
-    function initApp() {
+    function initXR() {
+      xrButton = new WebXRButton({
+        onRequestSession: onRequestSession,
+        onEndSession: onEndSession,
+        textEnterXR: "INICIAR PANORAMA",
+        textXRNotFound: "XR NO SOPORTADO",
+        textLeaveXR: "SALIR"
+      });
+      document.querySelector('header').appendChild(xrButton.domElement);
+
+      if (navigator.xr) {
+        navigator.xr.isSessionSupported('inline').then((supported) => {
+          xrButton.enabled = supported;
+        });
+      }
+    }
+
+    function onRequestSession() {
+      return navigator.xr.requestSession('inline').then(onSessionStarted);
+    }
+
+    function onSessionStarted(session) {
+      xrSession = session;
+      xrButton.setSession(session);
+      session.addEventListener('end', onSessionEnded);
+
       initGL();
-      
-      // Control por ratón para computadoras de escritorio (Permite probar sin celular)
-      let isDragging = false;
-      window.addEventListener('mousedown', () => isDragging = true);
-      window.addEventListener('mouseup', () => isDragging = false);
-      window.addEventListener('mousemove', (e) => {
-        if (!isDragging && !isMobile) {
-          // Rotación con ratón simulada si no es teléfono
-          alpha -= e.movementX * 0.003;
-          beta  -= e.movementY * 0.003;
-        }
+
+      let glLayer = new XRWebGLLayer(session, gl);
+      session.updateRenderState({ baseLayer: glLayer });
+
+      session.requestReferenceSpace('viewer').then((refSpace) => {
+        xrRefSpace = refSpace;
+        // El asistente original mapea el canvas para escuchar interacciones del ratón/táctiles
+        inlineViewerHelper = new InlineViewerHelper(gl.canvas, refSpace);
+        inlineViewerHelper.setHeight(1.6); 
+
+        session.requestAnimationFrame(onXRFrame);
       });
-
-      // Listener para el botón de activación (Requisito Android/iOS)
-      document.getElementById('start-button').addEventListener('click', () => {
-        document.getElementById('start-button').style.display = 'none';
-        activateSensors();
-      });
-
-      // Iniciamos el ciclo de renderizado web estándar (Independiente de WebXR)
-      window.requestAnimationFrame(renderFrame);
-    }
-
-    function activateSensors() {
-      // Intentar permiso de orientación (Para iPhone / iOS modernos)
-      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-        DeviceOrientationEvent.requestPermission()
-          .then(permissionState => {
-            if (permissionState === 'granted') {
-              isMobile = true;
-              window.addEventListener('deviceorientation', handleOrientation);
-            }
-          }).catch(console.error);
-      } else {
-        // Para Android (Samsung, Xiaomi, Huawei, etc.) bajo HTTPS seguro
-        window.addEventListener('deviceorientation', handleOrientation);
-      }
-    }
-
-    function handleOrientation(event) {
-      if (event.alpha !== null) {
-        isMobile = true;
-        // Convertimos a radianes los ángulos físicos reales del teléfono
-        alpha = event.alpha * (Math.PI / 180);
-        beta  = event.beta * (Math.PI / 180);
-        gamma = event.gamma * (Math.PI / 180);
-      }
     }
 
     function initGL() {
       if (gl) return;
-      gl = createWebGLContext({ xrCompatible: false }); // No requiere contexto XR estricto
+      gl = createWebGLContext({ xrCompatible: true });
       document.body.appendChild(gl.canvas);
 
       onResize();
@@ -154,40 +111,32 @@ Licensed under the MIT License
       gl.canvas.height = gl.canvas.clientHeight * window.devicePixelRatio;
     }
 
-    // El ciclo de renderizado universal que dibuja la escena en pantalla plana
-    function renderFrame(time) {
-      window.requestAnimationFrame(renderFrame);
+    function onEndSession(session) {
+      session.end();
+    }
+
+    function onSessionEnded(event) {
+      xrButton.setSession(null);
+      xrSession = null;
+    }
+
+    function onXRFrame(t, frame) {
+      let session = frame.session;
+      // Usamos la pose calculada por el asistente de arrastre táctil
+      let refSpace = inlineViewerHelper ? inlineViewerHelper.referenceSpace : xrRefSpace;
+      let pose = frame.getViewerPose(refSpace);
 
       scene.startFrame();
+      session.requestAnimationFrame(onXRFrame);
 
-      // CÁLCULO TRADICIONAL DE CUATERNIONES DE ROTACIÓN (Fórmula matemática de ventana mágica)
-      let c1 = Math.cos(alpha / 2);
-      let s1 = Math.sin(alpha / 2);
-      let c2 = Math.cos(beta / 2);
-      let s2 = Math.sin(beta / 2);
-      let c3 = Math.cos(gamma / 2);
-      let s3 = Math.sin(gamma / 2);
-
-      // Asignamos la orientación directa al nodo raíz para que mueva todo el paisaje
-      rootRotationNode.orientation = [
-        s2 * c1 * c3 - c2 * s1 * s3, // Eje X
-        c2 * s1 * c3 + s2 * c1 * s3, // Eje Y
-        c2 * c1 * s3 - s2 * s1 * c3, // Eje Z
-        c2 * c1 * c3 + s2 * s1 * s3  // Parámetro W
-      ];
-
-      // Simulamos la altura de visión (Cámara a 1.6m del suelo)
-      rootRotationNode.position = [0, -1.6, 0];
-
-      // Dibujamos de forma estándar sobre el lienzo WebGL plano
-      // Al pasar null, el framework dibuja la vista por defecto de la pantalla en lugar de un visor VR
-      scene.drawInlineFrame(gl.canvas.width, gl.canvas.height);
+      if (pose) {
+        scene.drawXRFrame(frame, pose);
+      }
 
       scene.endFrame();
     }
 
-    // Arranca la aplicación
-    initApp();
+    initXR();
   </script>
 </body>
 </html>
