@@ -12,14 +12,14 @@ Licensed under the MIT License
   <link rel='icon' type='image/png' sizes='3232' href='favicon-32x32.png'>
   <link rel='icon' type='image/png' sizes='96x96' href='favicon-96x96.png'>
   <link rel='stylesheet' href='css/common.css'>
-  <title>Seguimiento a escala de la habitacion (Magic Window Sensores)</title>
+  <title>Seguimiento a escala de la habitacion (Magic Window)</title>
 </head>
 <body>
   <header>
     <details open>
       <summary>Escala de habitacion</summary>
       <p>
-        Haz clic abajo para iniciar. Gira tu cuerpo físicamente con el teléfono en la mano para explorar el entorno 3D en 360 grados usando tus sensores.
+        Haz clic abajo para iniciar. Explora el entorno en 360 grados arrastrando tu dedo en la pantalla del celular o con el ratón en la computadora.
         <a class="back" href="./">Back</a>
       </p>
     </details>
@@ -31,6 +31,7 @@ Licensed under the MIT License
     import { Renderer, createWebGLContext } from './js/render/core/renderer.js';
     import { Gltf2Node } from './js/render/nodes/gltf2.js';
     import { SkyboxNode } from './js/render/nodes/skybox.js';
+    import { InlineViewerHelper } from './js/util/inline-viewer-helper.js';
     import { QueryArgs } from './js/util/query-args.js';
 
     import WebXRPolyfill from './js/third-party/webxr-polyfill/build/webxr-polyfill.module.js';
@@ -41,6 +42,7 @@ Licensed under the MIT License
     let xrButton = null;
     let xrSession = null;
     let xrRefSpace = null;
+    let inlineViewerHelper = null;
 
     let gl = null;
     let renderer = null;
@@ -54,7 +56,7 @@ Licensed under the MIT License
       xrButton = new WebXRButton({
         onRequestSession: onRequestSession,
         onEndSession: onEndSession,
-        textEnterXR: "INICIAR SENSORES",
+        textEnterXR: "INICIAR PANORAMA",
         textXRNotFound: "XR NO SOPORTADO",
         textLeaveXR: "SALIR"
       });
@@ -68,8 +70,11 @@ Licensed under the MIT License
     }
 
     function onRequestSession() {
-      // Solicitamos la sesión inline básica
-      return navigator.xr.requestSession('inline').then(onSessionStarted);
+      // SOLUCIÓN AL FONDO NEGRO: Al pedir una sesión inline, pasamos explícitamente la característica "viewer"
+      // Esto le otorga al navegador los permisos internos necesarios para instanciar la cámara en pantalla plana.
+      return navigator.xr.requestSession('inline', {
+        requiredFeatures: ['viewer']
+      }).then(onSessionStarted);
     }
 
     function onSessionStarted(session) {
@@ -82,21 +87,15 @@ Licensed under the MIT License
       let glLayer = new XRWebGLLayer(session, gl);
       session.updateRenderState({ baseLayer: glLayer });
 
-      // SOLUCIÓN CLAVE: Solicitamos un espacio de referencia 'local' en lugar de 'viewer'.
-      // 'local' es el que le dice al navegador que mapee el giroscopio físico interno al objeto pose.
-      session.requestReferenceSpace('local').then((refSpace) => {
+      // Solicitamos el espacio de referencia básico que permite inicializar el lienzo
+      session.requestReferenceSpace('viewer').then((refSpace) => {
+        xrRefSpace = refSpace;
         
-        // Simulamos la altura de los ojos (1.6 metros) desplazando el espacio de referencia original.
-        // Esto reemplaza limpiamente lo que hacía el InlineViewerHelper de manera nativa.
-        xrRefSpace = refSpace.getOffsetReferenceSpace(new XRRigidTransform({y: -1.6}));
-        
+        // Inicializamos el asistente para poder mover la cámara arrastrando con el dedo o con el ratón
+        inlineViewerHelper = new InlineViewerHelper(gl.canvas, refSpace);
+        inlineViewerHelper.setHeight(1.6); 
+
         session.requestAnimationFrame(onXRFrame);
-      }).catch(() => {
-        // Fallback secundario si el dispositivo bloquea el espacio local
-        session.requestReferenceSpace('viewer').then((refSpace) => {
-          xrRefSpace = refSpace;
-          session.requestAnimationFrame(onXRFrame);
-        });
       });
     }
 
@@ -129,12 +128,16 @@ Licensed under the MIT License
 
     function onXRFrame(t, frame) {
       let session = frame.session;
-      let pose = frame.getViewerPose(xrRefSpace);
+      
+      // Consultamos la pose generada a través de las interacciones táctiles/ratón calculadas por el helper
+      let refSpace = inlineViewerHelper ? inlineViewerHelper.referenceSpace : xrRefSpace;
+      let pose = frame.getViewerPose(refSpace);
 
       scene.startFrame();
       session.requestAnimationFrame(onXRFrame);
 
       if (pose) {
+        // Renderizamos de manera segura la capa de dibujo
         scene.drawXRFrame(frame, pose);
       }
 
@@ -145,3 +148,4 @@ Licensed under the MIT License
   </script>
 </body>
 </html>
+
