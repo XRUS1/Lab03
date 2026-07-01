@@ -14,7 +14,6 @@ Licensed under the MIT License
   <link rel='stylesheet' href='css/common.css'>
   <title>Seguimiento a escala de la habitacion (Magic Window)</title>
   <style>
-    /* Estilos para asegurar que el canvas ocupe toda la pantalla del teléfono */
     body, html {
       margin: 0;
       padding: 0;
@@ -56,20 +55,19 @@ Licensed under the MIT License
       let polyfill = new WebXRPolyfill();
     }
 
-    // Variables de control de WebXR y sensores
     let xrButton = null;
     let xrSession = null;
     let xrRefSpace = null;
 
-    // Variables del motor gráfico WebGL
     let gl = null;
     let renderer = null;
     let scene = new Scene();
 
-    // Variables para almacenar la orientación física del móvil (Ángulos de Euler)
-    let phoneRotation = { alpha: 0, beta: 0, gamma: 0 };
+    // Guardaremos los ángulos de rotación del teléfono en radianes
+    let currentAlpha = 0;
+    let currentBeta = 0;
+    let currentGamma = 0;
 
-    // Carga de activos del escenario original
     scene.addNode(new Gltf2Node({url: 'media/gltf/camp/camp.gltf'}));
     scene.addNode(new SkyboxNode({url: 'media/textures/eilenriede-park-2k.png'}));
     scene.standingStats(true);
@@ -91,9 +89,8 @@ Licensed under the MIT License
       }
     }
 
-    // Solicitar sesión inline e iniciar los listeners de hardware del teléfono
     function onRequestSession() {
-      // 1. Solicitar de manera explícita el permiso de orientación física (Requerido en iOS/iPhone)
+      // Solicitar permisos de sensores nativos para iOS y Android
       if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
         DeviceOrientationEvent.requestPermission()
           .then(permissionState => {
@@ -103,19 +100,17 @@ Licensed under the MIT License
           })
           .catch(console.error);
       } else {
-        // En Android se añade directamente el listener bajo el entorno seguro HTTPS
         window.addEventListener('deviceorientation', handleOrientation);
       }
 
       return navigator.xr.requestSession('inline').then(onSessionStarted);
     }
 
-    // Captura los ángulos de inclinación del dispositivo en tiempo real
     function handleOrientation(event) {
-      // alpha (rotación sobre eje Z / brújula), beta (inclinación adelante/atrás), gamma (inclinación izquierda/derecha)
-      phoneRotation.alpha = event.alpha ? event.alpha : 0;
-      phoneRotation.beta = event.beta ? event.beta : 0;
-      phoneRotation.gamma = event.gamma ? event.gamma : 0;
+      // Convertimos directamente a radianes para los cálculos gráficos
+      currentAlpha = event.alpha ? event.alpha * (Math.PI / 180) : 0;
+      currentBeta = event.beta ? event.beta * (Math.PI / 180) : 0;
+      currentGamma = event.gamma ? event.gamma * (Math.PI / 180) : 0;
     }
 
     function onSessionStarted(session) {
@@ -162,7 +157,6 @@ Licensed under the MIT License
       xrSession = null;
     }
 
-    // Ciclo principal de renderizado (Matriz de transformación)
     function onXRFrame(t, frame) {
       let session = frame.session;
       let pose = frame.getViewerPose(xrRefSpace);
@@ -171,34 +165,42 @@ Licensed under the MIT License
       session.requestAnimationFrame(onXRFrame);
 
       if (pose) {
-        // SOLUCIÓN AL CONGELAMIENTO: Si la pose nativa viene fija, calculamos el delta usando el sensor nativo
         for (let view of pose.views) {
-          // Convertimos los ángulos de Euler capturados del giróscopo a radianes
-          let radAlpha = phoneRotation.alpha * (Math.PI / 180);
-          let radBeta = phoneRotation.beta * (Math.PI / 180);
-          let radGamma = phoneRotation.gamma * (Math.PI / 180);
+          // Preparamos funciones trigonométricas limpias
+          let cA = Math.cos(currentAlpha), sA = Math.sin(currentAlpha);
+          let cB = Math.cos(currentBeta),  sB = Math.sin(currentBeta);
+          let cG = Math.cos(currentGamma), sG = Math.sin(currentGamma);
 
-          // Matrices de rotación trigonométricas manuales sobre los ejes del dispositivo
-          let cA = Math.cos(radAlpha), sA = Math.sin(radAlpha);
-          let cB = Math.cos(radBeta), sB = Math.sin(radBeta);
-          let cG = Math.cos(radGamma), sG = Math.sin(radGamma);
+          // Construimos una matriz 4x4 válida en formato Float32Array (Columna por columna)
+          // Esto evita romper la estructura interna del motor gráfico
+          let outMat = new Float32Array(16);
 
-          // Re-inyectamos la matriz de rotación en la vista 3D de forma directa (Matriz de 4x4)
-          // Esto sobreescribe los valores estáticos de la sesión inline del navegador móvil
-          view.transform.matrix[0] = cA * cG - sA * sB * sG;
-          view.transform.matrix[1] = -sA * cB;
-          view.transform.matrix[2] = cA * sG + sA * sB * cG;
-          
-          view.transform.matrix[4] = sA * sG + cA * sB * sG;
-          view.transform.matrix[5] = cA * cB;
-          view.transform.matrix[6] = sA * sG - cA * sB * cG;
-          
-          view.transform.matrix[8] = -cB * sG;
-          view.transform.matrix[9] = sB;
-          view.transform.matrix[10] = cB * cG;
+          // Columna 1
+          outMat[0] = cA * cG - sA * sB * sG;
+          outMat[1] = sA * cG + cA * sB * sG;
+          outMat[2] = -cB * sG;
+          outMat[3] = 0;
 
-          // Añadimos una elevación fija de la cámara (1.6m equivalente a la altura promedio de los ojos)
-          view.transform.matrix[13] = 1.6;
+          // Columna 2
+          outMat[4] = -sA * cB;
+          outMat[5] = cA * cB;
+          outMat[6] = sB;
+          outMat[7] = 0;
+
+          // Columna 3
+          outMat[8] = cA * sG + sA * sB * cG;
+          outMat[9] = sA * sG - cA * sB * cG;
+          outMat[10] = cB * cG;
+          outMat[11] = 0;
+
+          // Columna 4 (Posición de la cámara: X=0, Y=1.6 metros de altura, Z=0)
+          outMat[12] = 0;
+          outMat[13] = 1.6;
+          outMat[14] = 0;
+          outMat[15] = 1;
+
+          // Asignamos la matriz corregida a la transformación de la vista
+          view.transform.matrix.set(outMat);
         }
 
         scene.drawXRFrame(frame, pose);
