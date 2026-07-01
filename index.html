@@ -12,7 +12,7 @@ Licensed under the MIT License
   <link rel='icon' type='image/png' sizes='3232' href='favicon-32x32.png'>
   <link rel='icon' type='image/png' sizes='96x96' href='favicon-96x96.png'>
   <link rel='stylesheet' href='css/common.css'>
-  <title>Seguimiento a escala de la habitacion (Magic Window Sensores)</title>
+  <title>Seguimiento a escala de la habitacion (Magic Window Giroscopio)</title>
 </head>
 <body>
   <header>
@@ -46,6 +46,12 @@ Licensed under the MIT License
     let renderer = null;
     let scene = new Scene();
 
+    // Variables de orientación nativas del giroscopio del teléfono
+    let deviceAlpha = 0;
+    let deviceBeta = 0;
+    let deviceGamma = 0;
+
+    // Cargamos los elementos dentro de la escena raíz del framework
     scene.addNode(new Gltf2Node({url: 'media/gltf/camp/camp.gltf'}));
     scene.addNode(new SkyboxNode({url: 'media/textures/eilenriede-park-2k.png'}));
     scene.standingStats(true);
@@ -68,8 +74,16 @@ Licensed under the MIT License
     }
 
     function onRequestSession() {
-      // Solicitamos la sesión inline básica
+      // CAPTURA DIRECTA DEL SENSOR: Escuchamos el giroscopio de Android/Samsung de forma paralela a WebXR
+      window.addEventListener('deviceorientation', handleOrientation, true);
       return navigator.xr.requestSession('inline').then(onSessionStarted);
+    }
+
+    function handleOrientation(event) {
+      // Almacenamos las rotaciones físicas reales del teléfono en grados
+      deviceAlpha = event.alpha ? event.alpha : 0; // Rotación sobre eje Z (Giro izquierda/derecha)
+      deviceBeta = event.beta ? event.beta : 0;   // Rotación sobre eje X (Inclinación adelante/atrás)
+      deviceGamma = event.gamma ? event.gamma : 0; // Rotación sobre eje Y (Inclinación lateral)
     }
 
     function onSessionStarted(session) {
@@ -82,21 +96,10 @@ Licensed under the MIT License
       let glLayer = new XRWebGLLayer(session, gl);
       session.updateRenderState({ baseLayer: glLayer });
 
-      // SOLUCIÓN CLAVE: Solicitamos un espacio de referencia 'local' en lugar de 'viewer'.
-      // 'local' es el que le dice al navegador que mapee el giroscopio físico interno al objeto pose.
-      session.requestReferenceSpace('local').then((refSpace) => {
-        
-        // Simulamos la altura de los ojos (1.6 metros) desplazando el espacio de referencia original.
-        // Esto reemplaza limpiamente lo que hacía el InlineViewerHelper de manera nativa.
-        xrRefSpace = refSpace.getOffsetReferenceSpace(new XRRigidTransform({y: -1.6}));
-        
+      // Solicitamos el espacio de referencia base viewer requerido para sesiones inline
+      session.requestReferenceSpace('viewer').then((refSpace) => {
+        xrRefSpace = refSpace;
         session.requestAnimationFrame(onXRFrame);
-      }).catch(() => {
-        // Fallback secundario si el dispositivo bloquea el espacio local
-        session.requestReferenceSpace('viewer').then((refSpace) => {
-          xrRefSpace = refSpace;
-          session.requestAnimationFrame(onXRFrame);
-        });
       });
     }
 
@@ -119,6 +122,7 @@ Licensed under the MIT License
     }
 
     function onEndSession(session) {
+      window.removeEventListener('deviceorientation', handleOrientation, true);
       session.end();
     }
 
@@ -135,6 +139,49 @@ Licensed under the MIT License
       session.requestAnimationFrame(onXRFrame);
 
       if (pose) {
+        // TRADUCCIÓN MATRICIAL FLUIDA: Convertimos los ángulos del giroscopio a radianes
+        let radAlpha = deviceAlpha * (Math.PI / 180);
+        let radBeta = deviceBeta * (Math.PI / 180);
+        let radGamma = deviceGamma * (Math.PI / 180);
+
+        let c1 = Math.cos(radAlpha / 2);
+        let s1 = Math.sin(radAlpha / 2);
+        let c2 = Math.cos(radBeta / 2);
+        let s2 = Math.sin(radBeta / 2);
+        let c3 = Math.cos(radGamma / 2);
+        let s3 = Math.sin(radGamma / 2);
+
+        // Componentes matemáticos del cuaternión de rotación del teléfono
+        let qx = s2 * c1 * c3 - c2 * s1 * s3;
+        let qy = c2 * s1 * c3 + s2 * c1 * s3;
+        let qz = c2 * c1 * s3 - s2 * s1 * c3;
+        let qw = c2 * c1 * c3 + s2 * c1 * s3;
+
+        for (let view of pose.views) {
+          let m = view.transform.matrix;
+
+          // Inyectamos la rotación exacta calculada directamente en la matriz 4x4 de la vista WebGL.
+          // Esto soluciona la congelación nativa impuesta por Chrome en dispositivos Android.
+          m[0] = 1 - 2 * (qy * qy + qz * qz);
+          m[1] = 2 * (qx * qy + qz * qw);
+          m[2] = 2 * (qx * qz - qy * qw);
+
+          m[4] = 2 * (qx * qy - qz * qw);
+          m[5] = 1 - 2 * (qx * qx + qz * qz);
+          m[6] = 2 * (qy * qz + qx * qw);
+
+          m[8] = 2 * (qx * qz + qy * qw);
+          m[9] = 2 * (qy * qz - qx * qw);
+          m[10] = 1 - 2 * (qx * qx + qy * qy);
+
+          // Fijamos la posición de la cámara (X = 0, Altura de los ojos Y = 1.6m, Z = 0)
+          m[12] = 0;
+          m[13] = 1.6;
+          m[14] = 0;
+          m[15] = 1;
+        }
+
+        // Renderizamos usando la inyección directa del giroscopio sobre la API original
         scene.drawXRFrame(frame, pose);
       }
 
