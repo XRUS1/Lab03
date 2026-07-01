@@ -6,21 +6,39 @@ Licensed under the MIT License
 <html>
 <head>
   <meta charset='utf-8'>
-  <meta name='viewport' content='width=device-width, initial-scale=1, user-scalable=no'>
+  <meta name='viewport' content='width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover'>
   <meta name='mobile-web-app-capable' content='yes'>
   <meta name='apple-mobile-web-app-capable' content='yes'>
   <link rel='icon' type='image/png' sizes='3232' href='favicon-32x32.png'>
   <link rel='icon' type='image/png' sizes='96x96' href='favicon-96x96.png'>
   <link rel='stylesheet' href='css/common.css'>
   <title>Seguimiento a escala de la habitacion (Magic Window)</title>
+  <style>
+    /* Estilos para asegurar que el canvas ocupe toda la pantalla del teléfono */
+    body, html {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #000;
+    }
+    canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100% !important;
+      height: 100% !important;
+    }
+  </style>
 </head>
 <body>
-  <header>
+  <header style="position: absolute; z-index: 10; background: rgba(0,0,0,0.6); color: #fff; padding: 10px; width: 100%;">
     <details open>
       <summary>Escala de habitacion</summary>
       <p>
-        Usa el botón de abajo para activar los sensores de tu teléfono y explorar el entorno en 360 grados sin necesidad de casco.
-        <a class="back" href="./">Back</a>
+        Haz clic abajo para activar los sensores físicos de rotación y explorar el entorno en 360 grados.
+        <a class="back" href="./" style="color: #00bcd4;">Back</a>
       </p>
     </details>
   </header>
@@ -31,7 +49,6 @@ Licensed under the MIT License
     import { Renderer, createWebGLContext } from './js/render/core/renderer.js';
     import { Gltf2Node } from './js/render/nodes/gltf2.js';
     import { SkyboxNode } from './js/render/nodes/skybox.js';
-    import { InlineViewerHelper } from './js/util/inline-viewer-helper.js';
     import { QueryArgs } from './js/util/query-args.js';
 
     import WebXRPolyfill from './js/third-party/webxr-polyfill/build/webxr-polyfill.module.js';
@@ -39,42 +56,66 @@ Licensed under the MIT License
       let polyfill = new WebXRPolyfill();
     }
 
-    // Variables globales
+    // Variables de control de WebXR y sensores
     let xrButton = null;
     let xrSession = null;
     let xrRefSpace = null;
-    let inlineViewerHelper = null;
 
+    // Variables del motor gráfico WebGL
     let gl = null;
     let renderer = null;
     let scene = new Scene();
 
+    // Variables para almacenar la orientación física del móvil (Ángulos de Euler)
+    let phoneRotation = { alpha: 0, beta: 0, gamma: 0 };
+
+    // Carga de activos del escenario original
     scene.addNode(new Gltf2Node({url: 'media/gltf/camp/camp.gltf'}));
     scene.addNode(new SkyboxNode({url: 'media/textures/eilenriede-park-2k.png'}));
     scene.standingStats(true);
 
     function initXR() {
-      // Inicializamos el botón gráfico original
       xrButton = new WebXRButton({
         onRequestSession: onRequestSession,
         onEndSession: onEndSession,
-        textEnterXR: "INICIAR PANORAMA",
+        textEnterXR: "ACTIVAR GIRÓSCOPO",
         textXRNotFound: "XR NO SOPORTADO",
         textLeaveXR: "SALIR"
       });
       document.querySelector('header').appendChild(xrButton.domElement);
 
       if (navigator.xr) {
-        // Verificamos soporte únicamente para el modo sin casco ('inline')
         navigator.xr.isSessionSupported('inline').then((supported) => {
           xrButton.enabled = supported;
         });
       }
     }
 
-    // Esta función se ejecuta gracias al clic del usuario (Cumple con el requisito de seguridad)
+    // Solicitar sesión inline e iniciar los listeners de hardware del teléfono
     function onRequestSession() {
+      // 1. Solicitar de manera explícita el permiso de orientación física (Requerido en iOS/iPhone)
+      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        DeviceOrientationEvent.requestPermission()
+          .then(permissionState => {
+            if (permissionState === 'granted') {
+              window.addEventListener('deviceorientation', handleOrientation);
+            }
+          })
+          .catch(console.error);
+      } else {
+        // En Android se añade directamente el listener bajo el entorno seguro HTTPS
+        window.addEventListener('deviceorientation', handleOrientation);
+      }
+
       return navigator.xr.requestSession('inline').then(onSessionStarted);
+    }
+
+    // Captura los ángulos de inclinación del dispositivo en tiempo real
+    function handleOrientation(event) {
+      // alpha (rotación sobre eje Z / brújula), beta (inclinación adelante/atrás), gamma (inclinación izquierda/derecha)
+      phoneRotation.alpha = event.alpha ? event.alpha : 0;
+      phoneRotation.beta = event.beta ? event.beta : 0;
+      phoneRotation.gamma = event.gamma ? event.gamma : 0;
     }
 
     function onSessionStarted(session) {
@@ -87,19 +128,9 @@ Licensed under the MIT License
       let glLayer = new XRWebGLLayer(session, gl);
       session.updateRenderState({ baseLayer: glLayer });
 
-      // Solicitamos espacio de referencia local para activar los sensores del dispositivo móvil
-      session.requestReferenceSpace('local').then((refSpace) => {
+      session.requestReferenceSpace('viewer').then((refSpace) => {
         xrRefSpace = refSpace;
-        inlineViewerHelper = new InlineViewerHelper(gl.canvas, refSpace);
-        inlineViewerHelper.setHeight(1.6); // Altura simulada para la vista de ojos
-
         session.requestAnimationFrame(onXRFrame);
-      }).catch(() => {
-        // Alternativa si el dispositivo no provee 'local'
-        session.requestReferenceSpace('viewer').then((refSpace) => {
-          xrRefSpace = refSpace;
-          session.requestAnimationFrame(onXRFrame);
-        });
       });
     }
 
@@ -122,6 +153,7 @@ Licensed under the MIT License
     }
 
     function onEndSession(session) {
+      window.removeEventListener('deviceorientation', handleOrientation);
       session.end();
     }
 
@@ -130,22 +162,51 @@ Licensed under the MIT License
       xrSession = null;
     }
 
+    // Ciclo principal de renderizado (Matriz de transformación)
     function onXRFrame(t, frame) {
       let session = frame.session;
-      let refSpace = inlineViewerHelper ? inlineViewerHelper.referenceSpace : xrRefSpace;
-      let pose = frame.getViewerPose(refSpace);
+      let pose = frame.getViewerPose(xrRefSpace);
 
       scene.startFrame();
       session.requestAnimationFrame(onXRFrame);
 
       if (pose) {
+        // SOLUCIÓN AL CONGELAMIENTO: Si la pose nativa viene fija, calculamos el delta usando el sensor nativo
+        for (let view of pose.views) {
+          // Convertimos los ángulos de Euler capturados del giróscopo a radianes
+          let radAlpha = phoneRotation.alpha * (Math.PI / 180);
+          let radBeta = phoneRotation.beta * (Math.PI / 180);
+          let radGamma = phoneRotation.gamma * (Math.PI / 180);
+
+          // Matrices de rotación trigonométricas manuales sobre los ejes del dispositivo
+          let cA = Math.cos(radAlpha), sA = Math.sin(radAlpha);
+          let cB = Math.cos(radBeta), sB = Math.sin(radBeta);
+          let cG = Math.cos(radGamma), sG = Math.sin(radGamma);
+
+          // Re-inyectamos la matriz de rotación en la vista 3D de forma directa (Matriz de 4x4)
+          // Esto sobreescribe los valores estáticos de la sesión inline del navegador móvil
+          view.transform.matrix[0] = cA * cG - sA * sB * sG;
+          view.transform.matrix[1] = -sA * cB;
+          view.transform.matrix[2] = cA * sG + sA * sB * cG;
+          
+          view.transform.matrix[4] = sA * sG + cA * sB * sG;
+          view.transform.matrix[5] = cA * cB;
+          view.transform.matrix[6] = sA * sG - cA * sB * cG;
+          
+          view.transform.matrix[8] = -cB * sG;
+          view.transform.matrix[9] = sB;
+          view.transform.matrix[10] = cB * cG;
+
+          // Añadimos una elevación fija de la cámara (1.6m equivalente a la altura promedio de los ojos)
+          view.transform.matrix[13] = 1.6;
+        }
+
         scene.drawXRFrame(frame, pose);
       }
 
       scene.endFrame();
     }
 
-    // Ejecución inicial
     initXR();
   </script>
 </body>
